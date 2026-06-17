@@ -12,7 +12,7 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { GoldFrame } from "@/components/gold-ui";
 import { useSession } from "@/lib/session";
-import { webLoginWidget } from "@/lib/web-auth.functions";
+import { webLoginTelegramOidc, webLoginWidget } from "@/lib/web-auth.functions";
 
 const BOT_USERNAME = "GTCgames_bot";
 // Numeric bot id (first segment of the bot token). Required for the
@@ -40,6 +40,11 @@ type TgUser = {
   hash: string;
 };
 
+type TgOidcResult = {
+  id_token?: string;
+  error?: string;
+};
+
 declare global {
   interface Window {
     onTelegramAuthGtech?: (u: TgUser) => void;
@@ -54,6 +59,26 @@ function tgUserToData(tg: Record<string, unknown>): Record<string, string> {
     if (v != null) out[k] = String(v);
   });
   return out;
+}
+
+function loadTelegramOidcSdk() {
+  return new Promise<void>((resolve, reject) => {
+    if (typeof window === "undefined") return reject(new Error("Browser required"));
+    if (window.Telegram?.Login?.auth) return resolve();
+    const existing = document.getElementById("telegram-oidc-sdk") as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Telegram login failed to load")), { once: true });
+      return;
+    }
+    const s = document.createElement("script");
+    s.id = "telegram-oidc-sdk";
+    s.src = "https://oauth.telegram.org/js/telegram-login.js";
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Telegram login failed to load"));
+    document.head.appendChild(s);
+  });
 }
 
 function AuthPage() {
@@ -98,6 +123,27 @@ function AuthPage() {
     [signInWithWebToken],
   );
 
+  const completeOidcLogin = useCallback(
+    async (idToken: string) => {
+      setBusy(true);
+      try {
+        const r = await webLoginTelegramOidc({ data: { idToken } });
+        await signInWithWebToken(r.token);
+        toast.success("Signed in with Telegram");
+        setCountdown(REDIRECT_SECONDS);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Sign in failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [signInWithWebToken],
+  );
+
+  useEffect(() => {
+    void loadTelegramOidcSdk().catch(() => undefined);
+  }, []);
+
   // Handle return from oauth.telegram.org redirect flow.
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -110,11 +156,15 @@ function AuthPage() {
       const decoded = JSON.parse(atob(b64)) as Record<string, unknown>;
       // Clean hash so refreshes don't re-trigger.
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      if (typeof decoded.id_token === "string") {
+        void completeOidcLogin(decoded.id_token);
+        return;
+      }
       void completeLogin(tgUserToData(decoded));
     } catch {
       toast.error("Could not read Telegram response. Please try again.");
     }
-  }, [completeLogin]);
+  }, [completeLogin, completeOidcLogin]);
 
   // Mount Telegram Login Widget (best-effort).
   useEffect(() => {
@@ -140,20 +190,40 @@ function AuthPage() {
     };
   }, [completeLogin]);
 
-  // Fallback: open Telegram OAuth in a new tab / redirect on the same page.
-  // This always works on mobile and avoids the silent-iframe issue where the
-  // embedded widget renders nothing.
-  const openTelegramOAuth = useCallback(() => {
+  const openTelegramOAuth = useCallback(async () => {
     if (typeof window === "undefined") return;
-    const origin = window.location.origin;
-    const returnTo = window.location.origin + "/auth";
-    const url =
-      `https://oauth.telegram.org/auth?bot_id=${BOT_ID}` +
-      `&origin=${encodeURIComponent(origin)}` +
-      `&return_to=${encodeURIComponent(returnTo)}` +
-      `&request_access=write`;
-    window.location.href = url;
-  }, []);
+    if (busy) return;
+    setBusy(true);
+    try {
+      await loadTelegramOidcSdk();
+      const login = window.Telegram?.Login;
+      if (!login?.auth) throw new Error("Telegram login is not ready. Please try again.");
+      login.auth(
+        {
+          client_id: BOT_ID,
+          request_access: ["phone", "write"],
+          lang: navigator.language?.slice(0, 2) || "en",
+          nonce: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        },
+        (result: TgOidcResult) => {
+          if (result.error) {
+            setBusy(false);
+            if (result.error !== "popup_closed") toast.error(result.error);
+            return;
+          }
+          if (!result.id_token) {
+            setBusy(false);
+            toast.error("Telegram did not return login proof. Please try again.");
+            return;
+          }
+          void completeOidcLogin(result.id_token);
+        },
+      );
+    } catch (e) {
+      setBusy(false);
+      toast.error(e instanceof Error ? e.message : "Telegram login failed");
+    }
+  }, [busy, completeOidcLogin]);
 
   return (
     <div className="min-h-screen bg-background bg-circuit flex items-center justify-center p-6">
