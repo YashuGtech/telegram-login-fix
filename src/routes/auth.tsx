@@ -84,7 +84,6 @@ function loadTelegramOidcSdk() {
 function AuthPage() {
   const { user, signInWithWebToken } = useSession();
   const navigate = useNavigate();
-  const widgetHost = useRef<HTMLDivElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
 
@@ -166,30 +165,6 @@ function AuthPage() {
     }
   }, [completeLogin, completeOidcLogin]);
 
-  // Mount Telegram Login Widget (best-effort).
-  useEffect(() => {
-    if (!widgetHost.current) return;
-    widgetHost.current.innerHTML = "";
-
-    window.onTelegramAuthGtech = (tg) => {
-      void completeLogin(tgUserToData(tg as unknown as Record<string, unknown>));
-    };
-
-    const s = document.createElement("script");
-    s.src = "https://telegram.org/js/telegram-widget.js?22";
-    s.async = true;
-    s.setAttribute("data-telegram-login", BOT_USERNAME);
-    s.setAttribute("data-size", "large");
-    s.setAttribute("data-radius", "8");
-    s.setAttribute("data-onauth", "onTelegramAuthGtech(user)");
-    s.setAttribute("data-request-access", "write");
-    widgetHost.current.appendChild(s);
-
-    return () => {
-      delete window.onTelegramAuthGtech;
-    };
-  }, [completeLogin]);
-
   const openTelegramOAuth = useCallback(async () => {
     if (typeof window === "undefined") return;
     if (busy) return;
@@ -264,12 +239,6 @@ function AuthPage() {
               >
                 {busy ? "Signing in…" : "Login with Telegram"}
               </button>
-
-              {/* Embedded widget (best-effort). Hidden visually when it
-                  fails; the button above is the primary entry point. */}
-              <div className="mt-4 flex items-center justify-center" aria-busy={busy}>
-                <div ref={widgetHost} />
-              </div>
 
               <p className="mt-4 text-[11px] text-muted-foreground">
                 Click the button above. Telegram will ask for your phone number and send a
