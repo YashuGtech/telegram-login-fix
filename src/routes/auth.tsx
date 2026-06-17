@@ -104,6 +104,23 @@ function AuthPage() {
     }
   }, [user, countdown, navigate]);
 
+  const completeLegacyWidgetLogin = useCallback(
+    async (widgetData: Record<string, string>) => {
+      setBusy(true);
+      try {
+        const r = await webLoginWidget({ data: { widgetData } });
+        await signInWithWebToken(r.token);
+        toast.success("Signed in with Telegram");
+        setCountdown(REDIRECT_SECONDS);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Sign in failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [signInWithWebToken],
+  );
+
   const completeOidcLogin = useCallback(
     async (idToken: string) => {
       setBusy(true);
