@@ -7,14 +7,13 @@
  *    environments where the embedded widget iframe does not render.
  */
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { GoldFrame } from "@/components/gold-ui";
 import { useSession } from "@/lib/session";
 import { webLoginTelegramOidc, webLoginWidget } from "@/lib/web-auth.functions";
 
-const BOT_USERNAME = "GTCgames_bot";
 // Numeric bot id (first segment of the bot token). Required for the
 // oauth.telegram.org redirect flow used by the fallback button.
 const BOT_ID = 8989647034;
@@ -105,23 +104,6 @@ function AuthPage() {
     }
   }, [user, countdown, navigate]);
 
-  const completeLogin = useCallback(
-    async (widgetData: Record<string, string>) => {
-      setBusy(true);
-      try {
-        const r = await webLoginWidget({ data: { widgetData } });
-        await signInWithWebToken(r.token);
-        toast.success("Signed in with Telegram");
-        setCountdown(REDIRECT_SECONDS);
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Sign in failed");
-      } finally {
-        setBusy(false);
-      }
-    },
-    [signInWithWebToken],
-  );
-
   const completeOidcLogin = useCallback(
     async (idToken: string) => {
       setBusy(true);
@@ -159,11 +141,11 @@ function AuthPage() {
         void completeOidcLogin(decoded.id_token);
         return;
       }
-      void completeLogin(tgUserToData(decoded));
+      void completeLegacyWidgetLogin(tgUserToData(decoded));
     } catch {
       toast.error("Could not read Telegram response. Please try again.");
     }
-  }, [completeLogin, completeOidcLogin]);
+  }, [completeLegacyWidgetLogin, completeOidcLogin]);
 
   const openTelegramOAuth = useCallback(async () => {
     if (typeof window === "undefined") return;
