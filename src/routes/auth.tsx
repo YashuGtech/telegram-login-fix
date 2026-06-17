@@ -2,11 +2,12 @@
  * Browser sign-in route.
  *  - Telegram Login Widget (preferred): user clicks, confirms in their
  *    Telegram app, we verify the HMAC and issue a web session.
- *  - Phone OTP fallback via Telegram Gateway (requires TELEGRAM_GATEWAY_TOKEN
- *    secret to be set on the server).
+ *  - Visible fallback button that uses Telegram's OAuth redirect flow
+ *    (oauth.telegram.org). This works on mobile browsers and other
+ *    environments where the embedded widget iframe does not render.
  */
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { GoldFrame } from "@/components/gold-ui";
@@ -14,6 +15,9 @@ import { useSession } from "@/lib/session";
 import { webLoginWidget } from "@/lib/web-auth.functions";
 
 const BOT_USERNAME = "GTCgames_bot";
+// Numeric bot id (first segment of the bot token). Required for the
+// oauth.telegram.org redirect flow used by the fallback button.
+const BOT_ID = 8989647034;
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -44,6 +48,13 @@ declare global {
 
 const REDIRECT_SECONDS = 3;
 
+function tgUserToData(tg: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  Object.entries(tg).forEach(([k, v]) => {
+    if (v != null) out[k] = String(v);
+  });
+  return out;
+}
 
 function AuthPage() {
   const { user, signInWithWebToken } = useSession();
@@ -70,18 +81,10 @@ function AuthPage() {
     }
   }, [user, countdown, navigate]);
 
-  // Mount Telegram Login Widget.
-  useEffect(() => {
-    if (!widgetHost.current) return;
-    widgetHost.current.innerHTML = "";
-
-    window.onTelegramAuthGtech = async (tg) => {
+  const completeLogin = useCallback(
+    async (widgetData: Record<string, string>) => {
       setBusy(true);
       try {
-        const widgetData: Record<string, string> = {};
-        Object.entries(tg).forEach(([k, v]) => {
-          if (v != null) widgetData[k] = String(v);
-        });
         const r = await webLoginWidget({ data: { widgetData } });
         await signInWithWebToken(r.token);
         toast.success("Signed in with Telegram");
@@ -91,6 +94,35 @@ function AuthPage() {
       } finally {
         setBusy(false);
       }
+    },
+    [signInWithWebToken],
+  );
+
+  // Handle return from oauth.telegram.org redirect flow.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash || "";
+    const match = hash.match(/tgAuthResult=([^&]+)/);
+    if (!match) return;
+    try {
+      let b64 = match[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const decoded = JSON.parse(atob(b64)) as Record<string, unknown>;
+      // Clean hash so refreshes don't re-trigger.
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      void completeLogin(tgUserToData(decoded));
+    } catch {
+      toast.error("Could not read Telegram response. Please try again.");
+    }
+  }, [completeLogin]);
+
+  // Mount Telegram Login Widget (best-effort).
+  useEffect(() => {
+    if (!widgetHost.current) return;
+    widgetHost.current.innerHTML = "";
+
+    window.onTelegramAuthGtech = (tg) => {
+      void completeLogin(tgUserToData(tg as unknown as Record<string, unknown>));
     };
 
     const s = document.createElement("script");
@@ -106,7 +138,22 @@ function AuthPage() {
     return () => {
       delete window.onTelegramAuthGtech;
     };
-  }, [navigate, signInWithWebToken]);
+  }, [completeLogin]);
+
+  // Fallback: open Telegram OAuth in a new tab / redirect on the same page.
+  // This always works on mobile and avoids the silent-iframe issue where the
+  // embedded widget renders nothing.
+  const openTelegramOAuth = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const origin = window.location.origin;
+    const returnTo = window.location.origin + "/auth";
+    const url =
+      `https://oauth.telegram.org/auth?bot_id=${BOT_ID}` +
+      `&origin=${encodeURIComponent(origin)}` +
+      `&return_to=${encodeURIComponent(returnTo)}` +
+      `&request_access=write`;
+    window.location.href = url;
+  }, []);
 
   return (
     <div className="min-h-screen bg-background bg-circuit flex items-center justify-center p-6">
@@ -137,9 +184,23 @@ function AuthPage() {
             </div>
           ) : (
             <>
-              <div className="mt-6 flex items-center justify-center" aria-busy={busy}>
+              {/* Always-visible primary action — works even if the embedded
+                  Telegram widget iframe fails to render. */}
+              <button
+                type="button"
+                onClick={openTelegramOAuth}
+                disabled={busy}
+                className="mt-6 w-full rounded-md bg-gradient-gold-flat px-4 py-3 text-base font-semibold text-primary-foreground shadow-md disabled:opacity-60"
+              >
+                {busy ? "Signing in…" : "Login with Telegram"}
+              </button>
+
+              {/* Embedded widget (best-effort). Hidden visually when it
+                  fails; the button above is the primary entry point. */}
+              <div className="mt-4 flex items-center justify-center" aria-busy={busy}>
                 <div ref={widgetHost} />
               </div>
+
               <p className="mt-4 text-[11px] text-muted-foreground">
                 Click the button above. Telegram will ask for your phone number and send a
                 Confirm / Decline message to your Telegram app to authorize the login.
@@ -158,4 +219,3 @@ function AuthPage() {
     </div>
   );
 }
-
