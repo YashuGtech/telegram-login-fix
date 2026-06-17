@@ -15,6 +15,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createHash, createHmac, randomBytes } from "crypto";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { supabaseAdmin as _supabaseAdmin } from "@/integrations/supabase/client.server";
 
 // New tables/columns (web_sessions, users.phone, admins.phone) are added by
@@ -39,8 +40,16 @@ const db = _supabaseAdmin as unknown as {
 };
 
 const BOT_TOKEN_FALLBACK = "8989647034:AAGGyGXPXyhb89PZxjc-pbet3G2b3tUQEvs";
+const TELEGRAM_CLIENT_ID_FALLBACK = "8989647034";
+const TELEGRAM_ISSUER = "https://oauth.telegram.org";
+const TELEGRAM_JWKS = createRemoteJWKSet(new URL("https://oauth.telegram.org/.well-known/jwks.json"));
+
 function botToken() {
   return process.env.TELEGRAM_BOT_TOKEN || BOT_TOKEN_FALLBACK;
+}
+
+function telegramClientId() {
+  return process.env.TELEGRAM_OIDC_CLIENT_ID || process.env.TELEGRAM_CLIENT_ID || TELEGRAM_CLIENT_ID_FALLBACK;
 }
 
 function newSessionToken() {
@@ -106,6 +115,30 @@ async function issueSession(userId: number) {
   return token;
 }
 
+function normalizePhone(phone: unknown) {
+  if (typeof phone !== "string") return null;
+  const trimmed = phone.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/[\s()-]/g, "");
+}
+
+function phoneVariants(phone: string) {
+  const bare = phone.replace(/^\+/, "");
+  return Array.from(new Set([phone, bare, `+${bare}`]));
+}
+
+async function findUserByPhone(phone: string) {
+  for (const candidate of phoneVariants(phone)) {
+    const { data } = await db
+      .from("users")
+      .select("telegram_id")
+      .eq("phone", candidate)
+      .maybeSingle();
+    if (data?.telegram_id != null) return Number(data.telegram_id);
+  }
+  return null;
+}
+
 // ───────────────────────── Telegram Login Widget ─────────────────────────
 
 const WidgetSchema = z.object({
@@ -147,6 +180,62 @@ export const webLoginWidget = createServerFn({ method: "POST" })
 
     const token = await issueSession(u.id);
     return { token, telegramId: u.id };
+  });
+
+// ───────────────────────── Telegram OIDC phone login ─────────────────────────
+
+const OidcSchema = z.object({
+  idToken: z.string().min(20).max(8192),
+});
+
+type TelegramOidcPayload = JWTPayload & {
+  id?: number | string;
+  name?: string;
+  preferred_username?: string;
+  picture?: string;
+  phone_number?: string;
+};
+
+export const webLoginTelegramOidc = createServerFn({ method: "POST" })
+  .inputValidator((input) => OidcSchema.parse(input))
+  .handler(async ({ data }) => {
+    const { payload } = await jwtVerify(data.idToken, TELEGRAM_JWKS, {
+      issuer: TELEGRAM_ISSUER,
+      audience: telegramClientId(),
+      clockTolerance: 60,
+    });
+    const p = payload as TelegramOidcPayload;
+    const telegramId = Number(p.id ?? p.sub);
+    if (!Number.isSafeInteger(telegramId) || telegramId <= 0) {
+      throw new Error("Telegram login did not return a valid user id.");
+    }
+
+    const phone = normalizePhone(p.phone_number);
+    if (!phone) throw new Error("Please allow Telegram to share your phone number to continue.");
+    const existingByPhone = phone ? await findUserByPhone(phone) : null;
+    const { data: existingById } = await db
+      .from("users")
+      .select("telegram_id")
+      .eq("telegram_id", telegramId)
+      .maybeSingle();
+    const sessionUserId = existingById?.telegram_id != null ? telegramId : existingByPhone ?? telegramId;
+    const profile = {
+      username: p.preferred_username ?? null,
+      first_name: p.name ?? null,
+      last_name: null,
+      photo_url: p.picture ?? null,
+      phone,
+      last_seen: new Date().toISOString(),
+    };
+
+    if (existingById || existingByPhone) {
+      await db.from("users").update(profile).eq("telegram_id", sessionUserId);
+    } else {
+      await db.from("users").insert({ telegram_id: telegramId, ...profile });
+    }
+
+    const token = await issueSession(sessionUserId);
+    return { token, telegramId: sessionUserId };
   });
 
 // ───────────────────────── Logout ─────────────────────────

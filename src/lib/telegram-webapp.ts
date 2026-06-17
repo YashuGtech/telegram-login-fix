@@ -10,6 +10,12 @@ const TELEGRAM_INIT_TIMEOUT_MS = 3_000;
 declare global {
   interface Window {
     Telegram?: {
+      Login?: {
+        auth: (
+          options: { client_id: number; request_access: string[]; lang?: string; nonce?: string },
+          callback: (result: { id_token?: string; error?: string }) => void,
+        ) => void;
+      };
       WebApp?: {
         initData: string;
         initDataUnsafe?: {
